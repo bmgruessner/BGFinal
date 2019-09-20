@@ -36,13 +36,14 @@ var file3D= "Kelch133DS.csv"; //filenemae with 3D structure
 
 //Metrics Chosen in menu above
 var posMetric="tertiary"; //Current Metric for position
-var disMetric="BLOSUM"; //Current Metric for dissimilarity
+var disMetric="PAM"; //Current Metric for dissimilarity
 var funMetric="function"; //Current metric for function/sensitivity
 
-blosumCheat="ARNDCQEGHILKMFPSTWYVBZX*i" //Helper to parse BLOSUM table
+pam1Cheat="ARNDCQEGHILKMFPSTWYV" //Helper to parse PAM table
 var aminoAcids = []; //aminoacids: holds basic data for all amino acids
 var baseFunction=0; //baseFunction: function of WT
-var BLOSUM62 = []; //Holds BLOSUM matrix
+var PAM1 = []; //Holds PAM matrix
+var PAMDist=[]; //Holds PAM bootstraps
 var mutants = []; //Holds amino acid substitutions data
 var fasta1D = ""; //Holds Amino acid seq
 var clean1D=""; //will hold full sequence string for secondary (NOT same as fasta1D)
@@ -50,7 +51,21 @@ var clean2D=""; //will hold full 2D structure string
 var legendList2D=[]; //will hold legend for 2D structures
 var structList2D=[]; //will hold list of labeled 2D features
 var structList3D=[]; //Will hold list of 3D features
+
+var mTAve=0; //average of mutant functions
 var newMut=[]; //info for simulated mutation
+var posDist=[]; //Holds bootstrapped function
+var posFactor=[]; //Averaged bootstrap mean
+var posFactorLo=[]; //pos low (2.5%)
+var posFactorHi=[]; //pos high (97.5%)
+var PAMDist=[]; //Holds bootstrapped PAMs
+var disFactor=[]; //Holds dissimilarity factors
+var disFactorLo=[];//dis low (2.5%)
+var disFactorHi=[]; //dis high (97.5%)
+var mutantsTemp=[]; //Mutants array without WT
+var POSCorrelation;
+var PAMCorrelation;
+var PredCorrelation;
 
 var xDMin; //lower range of Lollipop X scale
 var xDMax; //upper range of lollipop X Scale
@@ -122,41 +137,41 @@ function hPChange(wt, mut)
   return hP2-hP1;
 }
 
-//BLOSUM data and functions
-//reads in BLOSUM matrix into BLOSUM object
+//PAM data and functions
+//reads in PAM matrix into PAM object
 function nowloadBL()
 {
-  d3.csv("BLOSUM.csv").then(function(data)
+  d3.csv("PAM1.csv").then(function(data)
   {
     data.forEach(function(d)
     {
-      //BLOSUM62: 2D array [a][b], format [a]: letter in BLOSUMCheat
-      //[a][b] letter vs letter in BLOSUM2Cheat, value=score
+      //PAM1: 2D array [a][b], format [a]: letter in pam1Cheat
+      //[a][b] letter vs letter in PAM2Cheat, value=score
       //[a][-1]: id of [a] letter
-      BLOSUM62.push(
+      PAM1.push(
       [+d.A, +d.R, +d.N, +d.D, +d.C, +d.Q, +d.E, +d.G,
       +d.H, +d.I, +d.L, +d.K, +d.M, +d.F, +d.P, +d.S,
-      +d.T, +d.W, +d.Y, +d.V, +d.B, +d.Z, +d.X, d.blosum62]);
+      +d.T, +d.W, +d.Y, +d.V, d.PAM1]);
     });
     nowLoadMuts();
   });
 };
 
-//function BLOSUMMat: Finds BLOSUM score
-function BLOSUMMat(wt, mut)
+//function PAMMat: Finds PAM score
+function PAMMat(wt, mut)
 {
   //find row of values for wt amino acid
-  for (var a=0; a<BLOSUM62.length; a++)
+  for (var a=0; a<PAM1.length; a++)
   {
-    if(wt==blosumCheat[a])
+    if(wt==pam1Cheat[a])
     {
       //find corresponding mut key
-      for(var b=0; b<blosumCheat.length; b++)
+      for(var b=0; b<pam1Cheat.length; b++)
       {
-        if(mut==blosumCheat[b])
+        if(mut==pam1Cheat[b])
         {
-          //return value in matrix for wt vs mut BLOSUM score
-          return BLOSUM62[a][b];
+          //return value in matrix for wt vs mut PAM score
+          return PAM1[a][b];
         }
       } 
       console.log("B search failure!"); 
@@ -182,7 +197,7 @@ function nowLoadMuts()
         var mutation="-";
         var dpI=0;
         var dhP=0;
-        var BLOSUMScore=0;
+        var PAMScore=0;
         baseFunction=d.median;
         var sensitiv=0;
       }
@@ -193,9 +208,8 @@ function nowLoadMuts()
         var mutation=d.name.slice(-1);  //substituted amino acid
         var dpI= pIChange(original, mutation); //change in pI
         var dhP= hPChange(original, mutation);  //change in hydrophobicity
-        var BLOSUMScore= BLOSUMMat(original, mutation);  //BLOSUM score
-        //var sensitiv=d.median*Math.pow(2, BLOSUMScore);  alt calc, may be invalid
-        var sensitiv=(d.median-baseFunction)/(BLOSUMScore+5); //-4 is minimum BLOSUM Score
+        var PAMScore= PAMMat(original, mutation);  //PAM score
+        //var sensitiv=d.median*Math.pow(2, PAMScore);  alt calc, may be invalid
       }
       mutants.push({
         name: d.name,
@@ -205,7 +219,7 @@ function nowLoadMuts()
         mutation: mutation,
         dpI: dpI,
         dhP: dhP,
-        BLOSUMScore: BLOSUMScore,
+        PAMScore: PAMScore,
         sensitivity: sensitiv
       });
     });
@@ -222,6 +236,98 @@ function nowLoad1D()
     {
       fasta1D=fasta1D + Object.values(d)[0];
     });
+
+    //Let's bootstrap each pam score
+    var pamMax= d3.max(mutants, function(f){return f.PAMScore;}); //Max Pam Score
+
+    var hasWT=false;  //does mutant set have wt?
+    for (var a=0; a<mutants.length; a++)
+    {
+      if (mutants.name=="WT")
+      {
+        hasWT=true;
+      }
+    }
+
+    mutantsTemp=mutants.filter(function(m){return  m.name != "WT";}); //mutants without WT
+    mTAve=d3.mean(mutantsTemp, function(d){return d.function;});
+
+    for (var a=0; a<mutants.length; a++) //loads sensitivity data into mutants now that mTAve is calculated
+    {
+      mutants[a].sensitivity=mutants[a].function/mTAve;
+    }
+
+    for (var a=0; a<pamMax+1; a++)
+    {
+      PAMDist.push([]);
+      for (var b=0; b<1000; b++) //Bootstrap 100 intervals
+      {
+        var sumdist=0;
+        var sumfunc=0;
+        for (var c=0; c<mutantsTemp.length; c++)
+        {
+          position=Math.floor(Math.random()*(mutantsTemp.length-hasWT));
+          sumdist=sumdist + 1/Math.pow(1+Math.abs(a-mutantsTemp[position].PAMScore), 2);
+          sumfunc=sumfunc + mutantsTemp[position].function/Math.pow(1+Math.abs(a-mutantsTemp[position].PAMScore), 2);
+        }
+        PAMDist[a].push(sumfunc/sumdist);
+      }
+      disFactor.push(d3.mean(PAMDist[a], function(d){return d;}));
+      PAMDist[a].sort();
+      disFactorLo.push(PAMDist[a][25]);
+      disFactorHi.push(PAMDist[a][974]);
+    }
+    var SSRPAM=d3.sum(mutantsTemp, function(d){return Math.pow((disFactor[d.PAMScore]-mTAve),2);});
+    var SSTOPAM=d3.sum(mutantsTemp, function(d){return Math.pow(d.function-mTAve,2);});
+    PAMCorrelation=SSRPAM/SSTOPAM;
+    console.log("PAM Correlation:");
+    console.log(PAMCorrelation);
+
+    //Let's bootstrap each position
+    for (var a=0; a<fasta1D.length; a++)  //iterate through each position
+    {
+      posDist.push([]);
+      for (var b=0; b<1000; b++) //grab 100 sets of bootstraps
+      {
+        var sumdist=0;
+        var sumfunc=0;
+        for (var c=0; c<mutantsTemp.length; c++) //grab 1000 bootstraps
+        {
+          var mutnum=Math.floor(Math.random()*(mutantsTemp.length-hasWT));
+          sumdist=sumdist + 1/Math.pow(1+Math.abs((a+1)-mutantsTemp[mutnum].position),3);
+          sumfunc=sumfunc + mutantsTemp[mutnum].function /Math.pow(1+Math.abs((a+1)-mutantsTemp[mutnum].position),3);
+        }
+        posDist[a].push(sumfunc/sumdist); 
+      }
+      posFactor.push(d3.mean(posDist[a], function(d){return d;}));
+      posDist[a].sort();
+      posFactorLo.push(posDist[a][25]);
+      posFactorHi.push(posDist[a][974]);
+    }
+    var SSRPos=d3.sum(mutantsTemp, function(d){return Math.pow((posFactor[d.position-1]-mTAve),2);});
+    var SSTOPos=d3.sum(mutantsTemp, function(d){return Math.pow(d.function-mTAve,2);});
+    PosCorrelation=SSRPos/SSTOPos;
+    console.log("Position correlation:");
+    console.log(PosCorrelation);
+
+    for (var a=0; a<mutantsTemp.length; a++)
+    {
+      mutantsTemp[a].predicted= Math.pow(Math.pow(posFactor[mutantsTemp[a].position-1],PosCorrelation) * 
+      Math.pow(disFactor[mutantsTemp[a].PAMScore],PAMCorrelation),1/(PAMCorrelation+PosCorrelation));
+    }
+
+    var SSRPred=d3.sum(mutantsTemp, function(d){return Math.pow((d.predicted-mTAve),2);});
+    var SSTOPred=d3.sum(mutantsTemp, function(d){return Math.pow(d.function-mTAve,2);});
+    PredCorrelation=SSRPred/SSTOPred;
+    console.log("final algorithm correlation:");
+    console.log(PredCorrelation);
+
+
+    console.log("mutantstemp");
+    console.log(mutantsTemp);
+
+    
+
     nowLoad2DL();
   });
 };
@@ -413,8 +519,8 @@ function dataCheck()
   //check that all the data registers properly in the console.
   console.log("aminoAcids");
   console.log(aminoAcids);
-  console.log("BLOSUM62"); 
-  console.log(BLOSUM62);
+  console.log("PAM1"); 
+  console.log(PAM1);
   console.log("mutants");
   console.log(mutants);
   console.log("sequence length:");
@@ -565,11 +671,11 @@ function nowDraw()
     buttons1.append("text")
     .attr("x",buttonmargin+195).attr("y",buttonmargin).text("DISSIMILARITY: ");
     buttons1.append("rect")
-    .attr('x',buttonmargin+300).attr('y', 0).attr("id", "blosum").attr("height", 20).attr("width", 100).attr("fill", "lightcoral").attr("stroke", "black")
-    .on("click", function(){ buttonClick("BLOSUM");} );
+    .attr('x',buttonmargin+300).attr('y', 0).attr("id", "pam").attr("height", 20).attr("width", 100).attr("fill", "lightcoral").attr("stroke", "black")
+    .on("click", function(){ buttonClick("PAM");} );
     buttons1.append("text")
-    .attr("x",buttonmargin+300).attr("y",buttonmargin).text("BLOSUM");
-    buttons1.append("rect")
+    .attr("x",buttonmargin+300).attr("y",buttonmargin).text("PAM");
+    /*buttons1.append("rect")
     .attr("id", "pka").attr('x',buttonmargin+300).attr('y', buttonmargin+5).attr("height", 20).attr("width", 100).attr("fill", "ghostwhite").attr("stroke", "black")
     .on("click", function(){ buttonClick("pKa");} );
     buttons1.append("text")
@@ -578,7 +684,7 @@ function nowDraw()
     .attr("id", "hydrophob").attr('x',buttonmargin+300).attr('y', buttonmargin+25).attr("height", 20).attr("width", 100).attr("fill", "ghostwhite").attr("stroke", "black")
     .on("click", function(){ buttonClick("hydroPhob");} );
     buttons1.append("text")
-    .attr("x",buttonmargin+300).attr("y",buttonmargin+40).text("Hydrophobicity");
+    .attr("x",buttonmargin+300).attr("y",buttonmargin+40).text("Hydrophobicity"); */
     //function
     buttons1.append("text")
     .attr("x",buttonmargin+410).attr("y",buttonmargin).text("FUNCTION: ");
@@ -594,6 +700,26 @@ function nowDraw()
     .attr("x",buttonmargin+500) .attr("y",buttonmargin+20).text("Sensitivity");
     buttons1.append("circle")
     .attr("cx", buttonmargin+600).attr("cy", 0)
+
+    //legend
+    buttons1.append("text")
+    .attr("x", buttonmargin).attr("y", buttonmargin+38).text("LEGEND: ")
+    buttons1.append("circle")
+    .attr("cx", buttonmargin+90).attr("cy", buttonmargin+35).attr("r", 5).attr("fill", "darkslateblue")
+    buttons1.append("text")
+    .attr("x", buttonmargin+100).attr("y", buttonmargin+38).text("Sensitive")
+    buttons1.append("circle")
+    .attr("cx", buttonmargin+200).attr("cy", buttonmargin+35).attr("r", 5).attr("fill", "lightcoral")
+    buttons1.append("text")
+    .attr("x", buttonmargin+210).attr("y", buttonmargin+38).text("Resistant")
+    buttons1.append("circle")
+    .attr("cx", buttonmargin+310).attr("cy", buttonmargin+35).attr("r", 5).attr("fill", "green")
+    buttons1.append("text")
+    .attr("x", buttonmargin+320).attr("y", buttonmargin+38).text("Predicted")
+    buttons1.append("circle")
+    .attr("cx", buttonmargin+415).attr("cy", buttonmargin+35).attr("r", 7).attr("fill", "purple").attr("opacity", 0.5)
+    buttons1.append("text")
+    .attr("x", buttonmargin+425).attr("y", buttonmargin+38).text("Simulated")
   };
 
   function buttonClick(returnMetric) //Formats text at top
@@ -604,7 +730,7 @@ function nowDraw()
       d3.select("#tertiary")
         .style('fill', 'red');
       d3.select("#secondary")
-        .style('fill', 'grey');
+        .style('fill', 'ghostwhite');
       destroyBar1();
       makeBar1();
     }
@@ -618,10 +744,10 @@ function nowDraw()
       destroyBar1();
       makeBar1();
     }
-    if (returnMetric=="BLOSUM")
+    if (returnMetric=="PAM")
     {
-      disMetric="BLOSUM";
-      d3.select("#blosum")
+      disMetric="PAM";
+      d3.select("#pam")
         .style("fill", "lightcoral");
       d3.select("#pka")
         .style("fill", "ghostwhite");
@@ -633,7 +759,7 @@ function nowDraw()
     else if (returnMetric=="pKa")
     {
       disMetric="pKa";
-      d3.select("#blosum")
+      d3.select("#pam")
         .style("fill", "ghostwhite");
       d3.select("#pka")
         .style("fill", "lightcoral");
@@ -645,7 +771,7 @@ function nowDraw()
     else if (returnMetric=="hydroPhob")
     {
       disMetric="hydroPhob";
-      d3.select("#blosum")
+      d3.select("#pam")
         .style("fill", "ghostwhite");
       d3.select("#pka")
         .style("fill", "ghostwhite");
@@ -708,7 +834,7 @@ function nowDraw()
     .range([0, d3.max(mutants, function(d){return d.function;})])
     .domain([l1HG-margin, 0]);
   var L1YSScaleRev=d3.scaleLinear()
-    .range([d3.min(mutants, function(d){ return d.sensitivity;}), d3.max(mutants, function(d){ return d.sensitivity ;})])
+    .range([0, d3.max(mutants, function(d){ return d.sensitivity ;})])
     .domain([l1HG-margin, 0]);
   
   function L1ScaleRev(avalue)  //from mouse position, finds y scale val
@@ -786,7 +912,17 @@ function nowDraw()
     lollipop1.append("text")  //L1 Title
       .attr("y",20)
       .attr("x",200)
-      .text("Chart of function of mutations based on protein position");
+      .text("Chart of function of mutations based on amino acid position");
+
+    lollipop1.append("text") //x-axis label
+      .attr("y", l1Drop+2*margin)
+      .attr("x", margin)
+      .text("Secondary structure");
+    lollipop1.append("text") //x-axis label
+      .attr("y", l1Drop+2*margin+20)
+      .attr("x", margin)
+      .text("Tertiary structure");
+
 
     //Lollipop chart lollipops
     lollipop1.selectAll("line").select("#l")
@@ -827,7 +963,7 @@ function nowDraw()
         if (funMetric=="sensitivity"){return L1YSScale(rThreshold)+margin;}
       })
       .style("stroke", "black")
-      .style("stroke-width", 2)
+      .style("stroke-width", 1)
       .attr("stroke-dasharray", "1");
 
     //2D structure diagram
@@ -956,19 +1092,63 @@ function nowDraw()
       .attr("font-size", "7px")
       .text(function(data){return data.structure3D;});
 
+      //make bootstrap weighted mean and 95% interval
+      var l1AveLine=d3.line()
+        .x(function(a, i){return L1XScale(i+1+xDMin)+margin;})
+        .y(function(a){return L1YScale(a)+margin});
+      lollipop1.append("path")
+        .datum(posFactor.filter(function(s, i){return (i <= xDMax) && (i >= xDMin);}))
+        .attr("id", "pathmean")
+        .attr("class", "line")
+        .attr("d", l1AveLine)
+        .attr("fill", "none")
+        .attr("stroke-width", 2)
+        .attr("stroke", "black");
+      lollipop1.append("path")
+        .datum(posFactorLo.filter(function(s, i){return (i <= xDMax) && (i >= xDMin);}))
+        .attr("id", "pathlow")
+        .attr("class", "line")
+        .attr("d", l1AveLine)
+        .attr("fill", "none")
+        .attr("opacity", 0.5)
+        .attr("stroke-width", 1)
+        .attr("stroke", "black");
+      lollipop1.append("path")
+        .datum(posFactorHi.filter(function(s, i){return (i <= xDMax) && (i >= xDMin);}))
+        .attr("id", "pathhi")
+        .attr("class", "line")
+        .attr("d", l1AveLine)
+        .attr("fill", "none")
+        .attr("opacity", 0.5)
+        .attr("stroke-width", 1)
+        .attr("stroke", "black");
+
+      lollipop1.selectAll("#predict")
+        .data(mutantsTemp.filter(function(s){return (s.position <= xDMax) && (s.position >= xDMin);}))
+        .enter()
+        .append("circle")
+        .attr("id", "predict")
+        .attr("cx", function(data){return L1XScale(data.position)+margin; } )
+        .attr("cy", function(data){return L1YScale(data.predicted)+margin; })
+        .attr("r",3)
+        .attr("fill", "green");
+
+
+
       //append simulation rect
       lollipop1.selectAll("#sim")
         .data(newMut)
         .enter()
-        .append("rect")
+        .append("circle")
           .attr("id", function (data){return "sim"; } )
-          .attr("x", function(data){
+          .attr("cx", function(data){
             return L1XScale(data.position)+margin; } )
-          .attr("y", margin )
-          .attr("width", L1XScale(2)-L1XScale(1))
-          .attr("height", l1H-margin)
-          .attr("fill", "grey")
-          .attr("opacity", 0.5);
+          .attr("cy", function(data){return margin + L1YScale(data.function);})
+          .attr("fill", "purple")
+          .attr("r", 7)
+          .attr("opacity", 0.5)
+          .on("mouseover", l1TooltipOn)
+          .on("mouseout", l1TooltipOff);
     };
 
   //clears old lollipop data
@@ -980,6 +1160,7 @@ function nowDraw()
     lollipop1.selectAll("line").remove();
     lollipop1.selectAll("rect").remove();
     lollipop1.selectAll("circle").remove();
+    lollipop1.selectAll("path").remove();
   };
 
   //Tooltip on for lollipops
@@ -991,7 +1172,7 @@ function nowDraw()
       .attr("id","l1Tooltip")
       .attr("x", xCoord+10)
       .attr("y", yCoord-12)
-      .attr("width", 40)
+      .attr("width", 60)
       .attr("height", 15)
       .attr("fill", "white")
       .attr("stroke", "black")
@@ -1008,7 +1189,7 @@ function nowDraw()
       .attr("id", "l1Tooltip")
       .attr("x", xCoord+10)
       .attr("y", yCoord)
-      .text(obj.name);
+      .text(obj.name + "," + obj.function);
     highlightAll(obj);
   };
 
@@ -1143,7 +1324,7 @@ function nowDraw()
   {
     if (funMetric=="function")
     {
-      return "Function";
+      return "Parasite half-life (hrs)";
     }
     else if (funMetric=="sensitivity")
     {
@@ -1293,7 +1474,7 @@ function nowDraw()
       .attr("y", 10)
       .attr("x", -170)
       .attr("transform", "rotate(-90)")
-      .text(yFuncText());   
+      .text("Count");   
     bar1.append("text")
       .attr("y",20)
       .attr("x",30)
@@ -1339,7 +1520,7 @@ function nowDraw()
   //Scatterplot scales and axis info
 
   var S1XScaleB=d3.scaleLinear()
-    .domain([d3.min(mutants.concat(newMut), function(d){return d.BLOSUMScore;}), d3.max(mutants.concat(newMut), function(d){return d.BLOSUMScore;})])
+    .domain([d3.min(mutants.concat(newMut), function(d){return d.PAMScore;}), d3.max(mutants.concat(newMut), function(d){return d.PAMScore;})])
     .range([0, s1W-3*margin]);
   var S1XScaleP=d3.scaleLinear()
     .domain([d3.min(mutants.concat(newMut), function(d){return d.dpI;}), d3.max(mutants.concat(newMut), function(d){return d.dpI;})])
@@ -1351,7 +1532,7 @@ function nowDraw()
     .domain([0, d3.max(mutants, function(d){return d.function})])
     .range([s1HG-margin, 0]);
   var S1YSScale=d3.scaleLinear()
-    .domain([d3.min(mutants, function(d){ return d.sensitivity;}), d3.max(mutants, function(d){return d.sensitivity})])
+    .domain([0, d3.max(mutants, function(d){return d.sensitivity})])
     .range([s1HG-margin, 0]);
 
   var S1XAx= d3.axisBottom();
@@ -1373,7 +1554,7 @@ function nowDraw()
 //sets metric for x axis
   function sXAxUse()
   {
-    if (disMetric=="BLOSUM"){S1XAx.scale(S1XScaleB);}
+    if (disMetric=="PAM"){S1XAx.scale(S1XScaleB);}
     else if (disMetric=="pKa"){S1XAx.scale(S1XScaleP);}
     else if (disMetric=="hydroPhob"){S1XAx.scale(S1XScaleH);}
   };
@@ -1381,7 +1562,7 @@ function nowDraw()
   //return data based on dissimilarity metric
   function sXFuncMetric(obj)
   {
-    if (disMetric=="BLOSUM"){return S1XScaleB(obj.BLOSUMScore);}
+    if (disMetric=="PAM"){return S1XScaleB(obj.PAMScore);}
     else if (disMetric=="pKa"){return S1XScaleP(obj.dpI);}
     else if (disMetric=="hydroPhob"){return S1XScaleH(obj.dhP);}
   }
@@ -1414,7 +1595,7 @@ function nowDraw()
   //draws the scatterplot
   function makeScatter1()
   {
-    S1XScaleB.domain([d3.min(mutants.concat(newMut), function(d){return d.BLOSUMScore;}), d3.max(mutants.concat(newMut), function(d){return d.BLOSUMScore;})])
+    S1XScaleB.domain([d3.min(mutants.concat(newMut), function(d){return d.PAMScore;}), d3.max(mutants.concat(newMut), function(d){return d.PAMScore;})])
     S1XScaleP.domain([d3.min(mutants.concat(newMut), function(d){return d.dpI;}), d3.max(mutants.concat(newMut), function(d){return d.dpI;})])
     S1XScaleH.domain([d3.min(mutants.concat(newMut), function(d){return d.dhP;}), d3.max(mutants.concat(newMut), function(d){return d.dhP;})])
     //axes
@@ -1440,7 +1621,7 @@ function nowDraw()
       .attr("font-size","8px")
       .text(function()
       {
-        if (disMetric=="BLOSUM"){return "BLOSUM Score";}
+        if (disMetric=="PAM"){return "PAM Score";}
         else if(disMetric=="pKa"){return "Change in pKa";}
         else if(disMetric=="hydroPhob"){return "Hydrophobicity change";}
       });
@@ -1481,18 +1662,58 @@ function nowDraw()
       .style("stroke", "black")
       .attr("stroke-dasharray", "2");
 
-        //adds simulation line
-        scatter1.selectAll("#sim")
-          .data(newMut)
+      //adds simulation line
+      scatter1.selectAll("#sim")
+        .data(newMut)
+        .enter()
+        .append("circle")
+          .attr("id", "sim")
+          .attr("cx",function(data){return sXFuncMetric(data)+margin; } )
+          .attr("cy", function(data){return S1YScale(data.function)+margin;})
+          .attr("r", 7)
+          .attr("fill", "purple")
+          .attr("opacity", 0.5);
+      
+      //Bootstrapped intervals
+      var s1AveLine=d3.line()
+        .x(function(a, i){return S1XScaleB(i)+margin;})
+        .y(function(a){return S1YScale(a)+margin});
+      scatter1.append("path")
+        .datum(disFactor)
+        .attr("id", "path")
+        .attr("class", "line")
+        .attr("d", s1AveLine)
+        .attr("fill", "none")
+        .attr("stroke", "black")
+        .attr("stroke-width", 2);
+      scatter1.append("path")
+        .datum(disFactorLo)
+        .attr("id", "pathlo")
+        .attr("class", "line")
+        .attr("d", s1AveLine)
+        .attr("fill", "none")
+        .attr("opacity", 0.5)
+        .attr("stroke", "black")
+        .attr("stroke-width", 1);
+      scatter1.append("path")
+        .datum(disFactorHi)
+        .attr("id", "pathhi")
+        .attr("class", "line")
+        .attr("d", s1AveLine)
+        .attr("fill", "none")
+        .attr("opacity", 0.5)
+        .attr("stroke", "black")
+        .attr("stroke-width", 1);
+
+        scatter1.selectAll("#predictS")
+          .data(mutantsTemp)
           .enter()
-          .append("rect")
-            .attr("id", "sim")
-            .attr("x",function(data){return sXFuncMetric(data)+margin-5; } )
-            .attr("y", margin)
-            .attr("width", 20 )
-            .attr("height", s1Drop)
-            .attr("fill", "grey")
-            .attr("opacity", 0.5);
+          .append("circle")
+          .attr("id", "predictS")
+          .attr("cx", function(data){return S1XScaleB(data.PAMScore)+margin; } )
+          .attr("cy", function(data){return S1YScale(data.predicted)+margin; })
+          .attr("r",3)
+          .attr("fill", "green");
     };
 
   //clears old bar1 data
@@ -1563,7 +1784,7 @@ function nowDraw()
     {
       var dpI= pIChange(original, mutation); //change in pI
       var dhP= hPChange(original, mutation);  //change in hydrophobicity
-      var BLOSUMScore= BLOSUMMat(original, mutation);  //BLOSUM score
+      var PAMScore= PAMMat(original, mutation);  //PAM score
       //find associated 2D and 3D structures
       var structure3D="None";
       var structure="unstructured";
@@ -1587,6 +1808,9 @@ function nowDraw()
             }
           }
       }
+      var func = Math.pow(Math.pow(posFactor[position-1],PosCorrelation) * 
+      Math.pow(disFactor[PAMScore],PAMCorrelation),1/(PAMCorrelation+PosCorrelation));
+
       //Replace old mutation with new
       newMut.pop();
       newMut.push(
@@ -1597,10 +1821,13 @@ function nowDraw()
         mutation: mutation,
         dpI: dpI,
         dhP: dhP,
-        BLOSUMScore: BLOSUMScore,
+        function: func,
+        PAMScore: PAMScore,
         structure3D: structure3D,
         structure: structure
       });
+
+      console.log(newMut);
 
       //Rebuild the vis
       document.getElementById("mutAnnounce").innerHTML="Simulated mutation: "+newMut[0].name;
